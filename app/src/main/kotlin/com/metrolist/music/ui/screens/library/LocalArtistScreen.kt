@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -95,7 +96,6 @@ fun LocalArtistScreen(
     val artist by viewModel.artist.collectAsState()
     val albums by viewModel.albums.collectAsState()
     val songs by viewModel.songs.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
 
     Timber.d("LocalArtistScreen: COMPOSE - artist=${artist?.artist?.name}, albumCount=${albums.size}, songCount=${songs.size}")
 
@@ -141,7 +141,14 @@ fun LocalArtistScreen(
                                     style = MaterialTheme.typography.headlineSmall,
                                     modifier = Modifier.padding(top = 16.dp)
                                 )
-                                if (!isLoading) {
+                                if (songs.isEmpty()) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .padding(top = 8.dp)
+                                            .size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
                                     Text(
                                         text = pluralStringResource(
                                             R.plurals.n_song,
@@ -379,7 +386,14 @@ fun LocalArtistScreen(
                                     style = MaterialTheme.typography.headlineSmall,
                                     modifier = Modifier.padding(top = 16.dp)
                                 )
-                                if (!isLoading) {
+                                if (songs.isEmpty()) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .padding(top = 8.dp)
+                                            .size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
                                     Text(
                                         text = pluralStringResource(
                                             R.plurals.n_song,
