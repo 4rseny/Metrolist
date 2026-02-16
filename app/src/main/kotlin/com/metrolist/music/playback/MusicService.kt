@@ -2757,8 +2757,15 @@ class MusicService :
                     return@Factory dataSpec.withUri(song.song.downloadUri.toUri())
                 }
 
-                // Check player cache (streaming buffer) - NOT download cache
-                // Download cache can have format mismatches, use downloadUri instead
+                // Fallback: Check download cache for old downloads without downloadUri
+                // This handles songs downloaded before the custom path feature was added
+                if (song?.song?.downloadUri == null && downloadCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)) {
+                    Timber.tag("CacheResolver").d("Using download cache (legacy) for $mediaId at pos=${dataSpec.position}")
+                    scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
+                    return@Factory dataSpec
+                }
+
+                // Check player cache (streaming buffer)
                 if (playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)) {
                     Timber.tag("CacheResolver").d("Using player cache for $mediaId at pos=${dataSpec.position}")
                     scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
