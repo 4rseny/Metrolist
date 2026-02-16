@@ -72,8 +72,14 @@ fun ShowMediaInfo(videoId: String) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboard.current
 
+    // Check if this is a local song (ID starts with LOCAL_)
+    val isLocalSong = videoId.startsWith("LOCAL_")
+
     LaunchedEffect(Unit, videoId) {
-        info = YouTube.getMediaInfo(videoId).getOrNull()
+        // Only fetch from YouTube for non-local songs
+        if (!isLocalSong) {
+            info = YouTube.getMediaInfo(videoId).getOrNull()
+        }
     }
     LaunchedEffect(Unit, videoId) {
         database.song(videoId).collect {
@@ -126,7 +132,26 @@ fun ShowMediaInfo(videoId: String) {
                         stringResource(R.string.song_artists) to song?.artists?.joinToString { it.name },
                         stringResource(R.string.media_id) to song?.id
                     )
-                    val extendedList = baseList + if (currentFormat != null) {
+
+                    // Add local file specific info
+                    val localInfoList = if (isLocalSong) {
+                        listOf(
+                            stringResource(R.string.album) to song?.song?.albumName,
+                            stringResource(R.string.year) to song?.song?.year?.toString(),
+                            stringResource(R.string.duration) to song?.song?.duration?.let {
+                                val minutes = it / 60
+                                val seconds = it % 60
+                                String.format("%d:%02d", minutes, seconds)
+                            },
+                            stringResource(R.string.file_path) to song?.song?.downloadUri,
+                            stringResource(R.string.volume) to if (playerConnection != null)
+                                "${(playerConnection.player.volume * 100).toInt()}%" else null,
+                        )
+                    } else {
+                        emptyList()
+                    }
+
+                    val formatList = if (currentFormat != null && !isLocalSong) {
                         listOf(
                             "Itag" to currentFormat?.itag?.toString(),
                             stringResource(R.string.mime_type) to currentFormat?.mimeType,
@@ -147,6 +172,8 @@ fun ShowMediaInfo(videoId: String) {
                     } else {
                         emptyList()
                     }
+
+                    val extendedList = baseList + localInfoList + formatList
 
                     extendedList.forEach { (label, text) ->
                         val displayText = text ?: stringResource(R.string.unknown)
@@ -184,16 +211,19 @@ fun ShowMediaInfo(videoId: String) {
             }
         }
 
-        item(contentType = "TitleMediaInfo") {
-            Text(
-                text = stringResource(R.string.information),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
+        // Only show YouTube information section for non-local songs
+        if (!isLocalSong) {
+            item(contentType = "TitleMediaInfo") {
+                Text(
+                    text = stringResource(R.string.information),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
-        if (info != null) {
+        if (info != null && !isLocalSong) {
             if (song == null)
                 item(contentType = "MediaTitle") {
                     Column(
@@ -294,7 +324,8 @@ fun ShowMediaInfo(videoId: String) {
                     }
                 }
             }
-        } else {
+        } else if (!isLocalSong) {
+            // Only show loading shimmer for non-local songs
             item(contentType = "MediaInfoLoader") {
                 ShimmerHost {
                     Row(

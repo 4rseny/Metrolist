@@ -723,4 +723,8 @@
     <string name="no_local_artists">No local music found</string>
     <string name="grant_permission">Grant permission</string>
     <string name="syncing_local_music">Scanning local music library…</string>
+    <string name="file_path">File path</string>
+    <string name="album">Album</string>
+    <string name="year">Year</string>
+    <string name="duration">Duration</string>
 </resources>
