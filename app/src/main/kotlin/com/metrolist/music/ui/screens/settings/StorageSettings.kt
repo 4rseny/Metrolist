@@ -403,7 +403,9 @@ fun StorageSettings(
                                 if (customDownloadPathUri.isNotEmpty()) {
                                     val displayPath = try {
                                         val uri = Uri.parse(customDownloadPathUri)
-                                        DocumentFile.fromTreeUri(context, uri)?.name ?: customDownloadPathUri
+                                        // Extract full path from URI (e.g., "primary:Music/Metrolist" -> "Music/Metrolist")
+                                        val docId = android.provider.DocumentsContract.getTreeDocumentId(uri)
+                                        docId?.substringAfter(":")?.ifEmpty { docId } ?: DocumentFile.fromTreeUri(context, uri)?.name ?: customDownloadPathUri
                                     } catch (e: Exception) {
                                         customDownloadPathUri
                                     }
