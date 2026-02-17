@@ -1048,8 +1048,95 @@ interface DatabaseDao {
     @Query("SELECT * FROM song WHERE isDownloaded = 1 ORDER BY totalPlayTime")
     fun downloadedSongsByPlayTimeAsc(): Flow<List<Song>>
 
-    @Query("UPDATE song SET isDownloaded = :downloaded, dateDownload = :date WHERE id = :songId")
+    // When audio is downloaded, also set isVideo = false to ensure it appears in downloaded music
+    // (even if a video was downloaded first, this song now has an audio download)
+    @Query("UPDATE song SET isDownloaded = :downloaded, dateDownload = :date, isVideo = CASE WHEN :downloaded = 1 THEN 0 ELSE isVideo END WHERE id = :songId")
     fun updateDownloadedInfo(songId: String, downloaded: Boolean, date: LocalDateTime?)
+
+    @Query("UPDATE song SET isDownloaded = :downloaded, dateDownload = :date, isVideo = :isVideo, mediaStoreUri = :mediaStoreUri WHERE id = :songId")
+    fun updateVideoDownloadInfo(songId: String, downloaded: Boolean, date: LocalDateTime?, isVideo: Boolean, mediaStoreUri: String?)
+
+    // Update only mediaStoreUri without changing isVideo flag (for live performances that can be both audio and video)
+    @Query("UPDATE song SET mediaStoreUri = :mediaStoreUri WHERE id = :songId")
+    fun updateMediaStoreUri(songId: String, mediaStoreUri: String?)
+
+    // Downloaded Music Only queries (excludes videos)
+    @Transaction
+    @Query("SELECT * FROM song WHERE isDownloaded = 1 AND (isVideo = 0 OR isVideo IS NULL) ORDER BY dateDownload")
+    fun downloadedMusicByCreateDateAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE isDownloaded = 1 AND (isVideo = 0 OR isVideo IS NULL) ORDER BY title")
+    fun downloadedMusicByNameAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE isDownloaded = 1 AND (isVideo = 0 OR isVideo IS NULL) ORDER BY totalPlayTime")
+    fun downloadedMusicByPlayTimeAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE isDownloaded = 1 AND (isVideo = 0 OR isVideo IS NULL) ORDER BY rowId")
+    fun downloadedMusicByRowIdAsc(): Flow<List<Song>>
+
+    fun downloadedMusicOnly(
+        sortType: SongSortType,
+        descending: Boolean,
+    ): Flow<List<Song>> = when (sortType) {
+        SongSortType.CREATE_DATE -> downloadedMusicByCreateDateAsc()
+        SongSortType.NAME -> downloadedMusicByNameAsc().map { songs ->
+            val collator = Collator.getInstance(Locale.getDefault())
+            collator.strength = Collator.PRIMARY
+            songs.sortedWith(compareBy(collator) { it.song.title })
+        }
+        SongSortType.ARTIST -> downloadedMusicByRowIdAsc().map { songs ->
+            val collator = Collator.getInstance(Locale.getDefault())
+            collator.strength = Collator.PRIMARY
+            songs.sortedWith(compareBy(collator) { song ->
+                song.artists.joinToString("") { it.name }
+            })
+        }
+        SongSortType.PLAY_TIME -> downloadedMusicByPlayTimeAsc()
+    }.map { it.reversed(descending) }
+
+    // Downloaded Videos queries - check mediaStoreUri to support live performances that can be both audio and video
+    @Transaction
+    @Query("SELECT * FROM song WHERE mediaStoreUri IS NOT NULL AND mediaStoreUri != '' ORDER BY dateDownload")
+    fun downloadedVideosByCreateDateAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE mediaStoreUri IS NOT NULL AND mediaStoreUri != '' ORDER BY title")
+    fun downloadedVideosByNameAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE mediaStoreUri IS NOT NULL AND mediaStoreUri != '' ORDER BY totalPlayTime")
+    fun downloadedVideosByPlayTimeAsc(): Flow<List<Song>>
+
+    @Transaction
+    @Query("SELECT * FROM song WHERE mediaStoreUri IS NOT NULL AND mediaStoreUri != '' ORDER BY rowId")
+    fun downloadedVideosByRowIdAsc(): Flow<List<Song>>
+
+    fun downloadedVideos(
+        sortType: SongSortType,
+        descending: Boolean,
+    ): Flow<List<Song>> = when (sortType) {
+        SongSortType.CREATE_DATE -> downloadedVideosByCreateDateAsc()
+        SongSortType.NAME -> downloadedVideosByNameAsc().map { videos ->
+            val collator = Collator.getInstance(Locale.getDefault())
+            collator.strength = Collator.PRIMARY
+            videos.sortedWith(compareBy(collator) { it.song.title })
+        }
+        SongSortType.ARTIST -> downloadedVideosByRowIdAsc().map { videos ->
+            val collator = Collator.getInstance(Locale.getDefault())
+            collator.strength = Collator.PRIMARY
+            videos.sortedWith(compareBy(collator) { video ->
+                video.artists.joinToString("") { it.name }
+            })
+        }
+        SongSortType.PLAY_TIME -> downloadedVideosByPlayTimeAsc()
+    }.map { it.reversed(descending) }
+
+    @Transaction
+    @Query("SELECT COUNT(1) FROM song WHERE mediaStoreUri IS NOT NULL AND mediaStoreUri != ''")
+    fun downloadedVideosCount(): Flow<Int>
 
     @Transaction
     @Query("SELECT * FROM song WHERE isUploaded = 1 ORDER BY dateDownload")

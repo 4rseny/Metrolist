@@ -385,9 +385,19 @@ fun SongListItem(
             Icon.Library()
         }
         if (showDownloadIcon) {
-            val download by LocalDownloadUtil.current.getDownload(song.id)
-                .collectAsState(initial = null)
-            Icon.Download(download?.state)
+            // For videos, check isDownloaded flag or mediaStoreUri
+            // For audio, check ExoPlayer download state
+            val isVideoDownloaded = song.song.isVideo && (song.song.isDownloaded || !song.song.mediaStoreUri.isNullOrBlank())
+            if (isVideoDownloaded) {
+                Icon.Download(STATE_COMPLETED)
+            } else if (!song.song.isVideo && !song.song.mediaStoreUri.isNullOrBlank()) {
+                // Non-video with mediaStoreUri (shouldn't normally happen, but handle it)
+                Icon.Download(STATE_COMPLETED)
+            } else {
+                val download by LocalDownloadUtil.current.getDownload(song.id)
+                    .collectAsState(initial = null)
+                Icon.Download(download?.state)
+            }
         }
     },
     isSelected: Boolean = false,
@@ -451,8 +461,17 @@ fun SongGridItem(
             Icon.Library()
         }
         if (showDownloadIcon) {
-            val download by LocalDownloadUtil.current.getDownload(song.id).collectAsState(initial = null)
-            Icon.Download(download?.state)
+            // For videos, check isDownloaded flag or mediaStoreUri
+            // For audio, check ExoPlayer download state
+            val isVideoDownloaded = song.song.isVideo && (song.song.isDownloaded || !song.song.mediaStoreUri.isNullOrBlank())
+            if (isVideoDownloaded) {
+                Icon.Download(STATE_COMPLETED)
+            } else if (!song.song.isVideo && !song.song.mediaStoreUri.isNullOrBlank()) {
+                Icon.Download(STATE_COMPLETED)
+            } else {
+                val download by LocalDownloadUtil.current.getDownload(song.id).collectAsState(initial = null)
+                Icon.Download(download?.state)
+            }
         }
     },
     isActive: Boolean = false,
@@ -992,8 +1011,15 @@ fun YouTubeListItem(
         //     Icon.Library()
         // }
         if (item is SongItem) {
-            val download by LocalDownloadUtil.current.getDownload(item.id).collectAsState(null)
-            Icon.Download(download?.state)
+            // For videos, check isDownloaded flag or mediaStoreUri; for audio, check ExoPlayer
+            val isVideoDownloaded = song?.song?.isVideo == true &&
+                (song?.song?.isDownloaded == true || !song?.song?.mediaStoreUri.isNullOrBlank())
+            if (isVideoDownloaded) {
+                Icon.Download(STATE_COMPLETED)
+            } else if (song?.song?.isVideo != true) {
+                val download by LocalDownloadUtil.current.getDownload(item.id).collectAsState(null)
+                Icon.Download(download?.state)
+            }
         }
     },
 ) {
@@ -1060,8 +1086,15 @@ fun YouTubeGridItem(
         if (item.explicit) Icon.Explicit()
         // if (item is SongItem && song?.song?.inLibrary != null) Icon.Library()
         if (item is SongItem) {
-            val download by LocalDownloadUtil.current.getDownload(item.id).collectAsState(null)
-            Icon.Download(download?.state)
+            // For videos, check isDownloaded flag or mediaStoreUri; for audio, check ExoPlayer
+            val isVideoDownloaded = song?.song?.isVideo == true &&
+                (song?.song?.isDownloaded == true || !song?.song?.mediaStoreUri.isNullOrBlank())
+            if (isVideoDownloaded) {
+                Icon.Download(STATE_COMPLETED)
+            } else if (song?.song?.isVideo != true) {
+                val download by LocalDownloadUtil.current.getDownload(item.id).collectAsState(null)
+                Icon.Download(download?.state)
+            }
         }
     },
     thumbnailRatio: Float = if (item is SongItem) 16f / 9 else 1f,

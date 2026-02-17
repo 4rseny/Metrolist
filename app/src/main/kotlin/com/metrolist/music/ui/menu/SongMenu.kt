@@ -7,16 +7,20 @@ package com.metrolist.music.ui.menu
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.widget.Toast
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,6 +28,9 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -82,6 +89,7 @@ import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.playback.ExoDownloadService
 import com.metrolist.music.playback.queues.YouTubeQueue
+import com.metrolist.music.ui.component.DefaultDialog
 import com.metrolist.music.ui.component.ListDialog
 import com.metrolist.music.ui.component.LocalBottomSheetPageState
 import com.metrolist.music.ui.component.Material3MenuGroup
@@ -90,7 +98,10 @@ import com.metrolist.music.ui.component.NewAction
 import com.metrolist.music.ui.component.NewActionGrid
 import com.metrolist.music.ui.component.SongListItem
 import com.metrolist.music.ui.component.TextFieldDialog
+import com.metrolist.music.ui.screens.player.downloadVideo
 import com.metrolist.music.ui.utils.ShowMediaInfo
+import com.metrolist.music.utils.MediaStoreHelper
+import com.metrolist.music.utils.YTPlayerUtils
 import com.metrolist.music.viewmodels.CachePlaylistViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -105,6 +116,8 @@ fun SongMenu(
     playlistBrowseId: String? = null,
     onDismiss: () -> Unit,
     isFromCache: Boolean = false,
+    isVideo: Boolean = false, // Override to treat as video (for video sections)
+    isLive: Boolean = false, // For live performances, show both song and video download options
 ) {
     val context = LocalContext.current
     val database = LocalDatabase.current
@@ -140,6 +153,14 @@ fun SongMenu(
     var showEditDialog by rememberSaveable {
         mutableStateOf(false)
     }
+
+    // Video download dialog state
+    var showVideoDownloadDialog by remember { mutableStateOf(false) }
+    var videoDownloadQualities by remember { mutableStateOf<List<YTPlayerUtils.VideoQualityInfo>>(emptyList()) }
+    var isLoadingVideoQualities by remember { mutableStateOf(false) }
+    var isDownloadingVideo by remember { mutableStateOf(false) }
+    var videoDownloadProgress by remember { mutableStateOf<String?>(null) }
+    val mediaStoreHelper = remember { MediaStoreHelper(context) }
 
     val TextFieldValueSaver: Saver<TextFieldValue, *> = Saver(
         save = { it.text },
@@ -291,6 +312,117 @@ fun SongMenu(
                             .padding(horizontal = 8.dp),
                     )
                 }
+            }
+        }
+    }
+
+    // Video download quality selector dialog
+    if (showVideoDownloadDialog) {
+        DefaultDialog(
+            onDismiss = { if (!isDownloadingVideo) showVideoDownloadDialog = false },
+            title = { Text(stringResource(if (isDownloadingVideo) R.string.downloading else R.string.video_download_quality)) },
+            buttons = {
+                if (isDownloadingVideo) {
+                    TextButton(onClick = {
+                        // Dismiss dialog but continue download in background
+                        showVideoDownloadDialog = false
+                        onDismiss()
+                    }) {
+                        Text(stringResource(R.string.background))
+                    }
+                }
+                TextButton(onClick = { showVideoDownloadDialog = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            }
+        ) {
+            if (isLoadingVideoQualities) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                }
+            } else if (isDownloadingVideo) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = videoDownloadProgress ?: stringResource(R.string.downloading),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            } else if (videoDownloadQualities.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    videoDownloadQualities.forEach { quality ->
+                        Surface(
+                            onClick = {
+                                isDownloadingVideo = true
+                                val artistDisplay = song.artists.joinToString(" • ") { it.name }
+                                downloadVideo(
+                                    context = context,
+                                    videoId = song.id,
+                                    targetHeight = quality.height,
+                                    title = song.song.title,
+                                    artist = artistDisplay,
+                                    database = database,
+                                    mediaStoreHelper = mediaStoreHelper,
+                                    onProgress = { progress -> videoDownloadProgress = progress },
+                                    onComplete = { success, message ->
+                                        isDownloadingVideo = false
+                                        showVideoDownloadDialog = false
+                                        if (success) {
+                                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                        }
+                                        onDismiss()
+                                    }
+                                )
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_video_hd),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.padding(horizontal = 8.dp))
+                                Column {
+                                    Text(
+                                        text = "${quality.height}p",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        text = quality.label,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    text = stringResource(R.string.no_video_qualities),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(16.dp)
+                )
             }
         }
     }
@@ -586,16 +718,88 @@ fun SongMenu(
         item { Spacer(modifier = Modifier.height(12.dp)) }
 
         item {
-            Material3MenuGroup(
-                items = listOf(
-                    when (download?.state) {
-                        Download.STATE_COMPLETED -> {
-                            Material3MenuItemData(
-                                title = {
-                                    Text(
-                                        text = stringResource(R.string.remove_download)
-                                    )
-                                },
+            // Check if this is a video context - use explicit parameter OR database flag
+            val isVideoContext = isVideo || originalSong.song.isVideo || song.song.isVideo
+            // For video context, check mediaStoreUri first (most reliable)
+            val videoMediaStoreUri = originalSong.song.mediaStoreUri?.takeIf { it.isNotBlank() }
+                ?: song.song.mediaStoreUri?.takeIf { it.isNotBlank() }
+            val isDownloadedVideo = videoMediaStoreUri != null
+            // Check if this is a video that's not downloaded yet
+            val isUndownloadedVideo = isVideoContext && !isDownloadedVideo
+
+            // For live performances, show both song and video download/remove options
+            if (isLive) {
+                Material3MenuGroup(
+                    items = buildList {
+                        // Song download/remove option
+                        when {
+                            download?.state == Download.STATE_COMPLETED -> {
+                                add(Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.remove_download) + " (${stringResource(R.string.music)})") },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.offline),
+                                            contentDescription = null
+                                        )
+                                    },
+                                    onClick = {
+                                        DownloadService.sendRemoveDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            song.id,
+                                            false,
+                                        )
+                                    }
+                                ))
+                            }
+                            download?.state == Download.STATE_QUEUED || download?.state == Download.STATE_DOWNLOADING -> {
+                                add(Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.downloading) + " (${stringResource(R.string.music)})") },
+                                    icon = {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(24.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    },
+                                    onClick = {
+                                        DownloadService.sendRemoveDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            song.id,
+                                            false,
+                                        )
+                                    }
+                                ))
+                            }
+                            else -> {
+                                add(Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.download_song)) },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.download),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        val downloadRequest = DownloadRequest
+                                            .Builder(song.id, song.id.toUri())
+                                            .setCustomCacheKey(song.id)
+                                            .setData(song.song.title.toByteArray())
+                                            .build()
+                                        DownloadService.sendAddDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            downloadRequest,
+                                            false,
+                                        )
+                                    }
+                                ))
+                            }
+                        }
+                        // Video download/remove option
+                        if (isDownloadedVideo) {
+                            add(Material3MenuItemData(
+                                title = { Text(text = stringResource(R.string.remove_download) + " (${stringResource(R.string.videos)})") },
                                 icon = {
                                     Icon(
                                         painter = painterResource(R.drawable.offline),
@@ -603,38 +807,28 @@ fun SongMenu(
                                     )
                                 },
                                 onClick = {
-                                    DownloadService.sendRemoveDownload(
-                                        context,
-                                        ExoDownloadService::class.java,
-                                        song.id,
-                                        false,
-                                    )
+                                    kotlinx.coroutines.MainScope().launch(Dispatchers.IO) {
+                                        val freshSong = database.getSongById(originalSong.id)
+                                        freshSong?.song?.mediaStoreUri?.let { uriString ->
+                                            val uri = android.net.Uri.parse(uriString)
+                                            mediaStoreHelper.deleteVideoFromMediaStore(uri)
+                                        }
+                                        freshSong?.let { songData ->
+                                            database.withTransaction {
+                                                upsert(
+                                                    songData.song.copy(
+                                                        mediaStoreUri = null
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                    onDismiss()
                                 }
-                            )
-                        }
-                        Download.STATE_QUEUED, Download.STATE_DOWNLOADING -> {
-                            Material3MenuItemData(
-                                title = { Text(text = stringResource(R.string.downloading)) },
-                                icon = {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(24.dp),
-                                        strokeWidth = 2.dp
-                                    )
-                                },
-                                onClick = {
-                                    DownloadService.sendRemoveDownload(
-                                        context,
-                                        ExoDownloadService::class.java,
-                                        song.id,
-                                        false,
-                                    )
-                                }
-                            )
-                        }
-                        else -> {
-                            Material3MenuItemData(
-                                title = { Text(text = stringResource(R.string.action_download)) },
-                                description = { Text(text = stringResource(R.string.download_desc)) },
+                            ))
+                        } else {
+                            add(Material3MenuItemData(
+                                title = { Text(text = stringResource(R.string.video_download)) },
                                 icon = {
                                     Icon(
                                         painter = painterResource(R.drawable.download),
@@ -642,24 +836,181 @@ fun SongMenu(
                                     )
                                 },
                                 onClick = {
-                                    val downloadRequest =
-                                        DownloadRequest
-                                            .Builder(song.id, song.id.toUri())
-                                            .setCustomCacheKey(song.id)
-                                            .setData(song.song.title.toByteArray())
-                                            .build()
-                                    DownloadService.sendAddDownload(
-                                        context,
-                                        ExoDownloadService::class.java,
-                                        downloadRequest,
-                                        false,
-                                    )
+                                    showVideoDownloadDialog = true
+                                    isLoadingVideoQualities = true
+                                    scope.launch {
+                                        try {
+                                            val adaptiveData = withContext(Dispatchers.IO) {
+                                                YTPlayerUtils.getAdaptiveVideoData(
+                                                    videoId = song.id,
+                                                    targetHeight = null,
+                                                    preferMp4 = true
+                                                ).getOrNull()
+                                            }
+                                            videoDownloadQualities = adaptiveData?.availableQualities ?: emptyList()
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        } finally {
+                                            isLoadingVideoQualities = false
+                                        }
+                                    }
                                 }
-                            )
+                            ))
                         }
                     }
                 )
-            )
+            } else {
+                Material3MenuGroup(
+                    items = listOf(
+                        when {
+                            // Downloaded video - show remove option
+                            isDownloadedVideo -> {
+                                Material3MenuItemData(
+                                    title = {
+                                        Text(
+                                            text = stringResource(R.string.remove_download)
+                                        )
+                                    },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.offline),
+                                            contentDescription = null
+                                        )
+                                    },
+                                    onClick = {
+                                        // Use a scope that won't be cancelled when menu dismisses
+                                        kotlinx.coroutines.MainScope().launch(Dispatchers.IO) {
+                                            // Fetch fresh data from database to get correct URI
+                                            val freshSong = database.getSongById(originalSong.id)
+                                            val uriToDelete = freshSong?.song?.mediaStoreUri
+                                                ?: videoMediaStoreUri
+
+                                            // Delete from MediaStore
+                                            uriToDelete?.let { uriString ->
+                                                val uri = android.net.Uri.parse(uriString)
+                                                mediaStoreHelper.deleteVideoFromMediaStore(uri)
+                                            }
+                                            // Clear the database entry using withTransaction to wait for completion and trigger Flow invalidation
+                                            freshSong?.let { songData ->
+                                                database.withTransaction {
+                                                    upsert(
+                                                        songData.song.copy(
+                                                            mediaStoreUri = null
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        onDismiss()
+                                    }
+                                )
+                            }
+                            // Video not downloaded - show download video option with quality selector
+                            isUndownloadedVideo -> {
+                                Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.video_download)) },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.download),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        // Show quality selector dialog
+                                        showVideoDownloadDialog = true
+                                        isLoadingVideoQualities = true
+                                        scope.launch {
+                                            try {
+                                                val adaptiveData = withContext(Dispatchers.IO) {
+                                                    YTPlayerUtils.getAdaptiveVideoData(
+                                                        videoId = song.id,
+                                                        targetHeight = null,
+                                                        preferMp4 = true
+                                                    ).getOrNull()
+                                                }
+                                                videoDownloadQualities = adaptiveData?.availableQualities ?: emptyList()
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                            } finally {
+                                                isLoadingVideoQualities = false
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                            // Regular audio download completed
+                            download?.state == Download.STATE_COMPLETED -> {
+                                Material3MenuItemData(
+                                    title = {
+                                        Text(
+                                            text = stringResource(R.string.remove_download)
+                                        )
+                                    },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.offline),
+                                            contentDescription = null
+                                        )
+                                    },
+                                    onClick = {
+                                        DownloadService.sendRemoveDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            song.id,
+                                            false,
+                                        )
+                                    }
+                                )
+                            }
+                            download?.state == Download.STATE_QUEUED || download?.state == Download.STATE_DOWNLOADING -> {
+                                Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.downloading)) },
+                                    icon = {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(24.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    },
+                                    onClick = {
+                                        DownloadService.sendRemoveDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            song.id,
+                                            false,
+                                        )
+                                    }
+                                )
+                            }
+                            else -> {
+                                Material3MenuItemData(
+                                    title = { Text(text = stringResource(R.string.action_download)) },
+                                    description = { Text(text = stringResource(R.string.download_desc)) },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.download),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        val downloadRequest =
+                                            DownloadRequest
+                                                .Builder(song.id, song.id.toUri())
+                                                .setCustomCacheKey(song.id)
+                                                .setData(song.song.title.toByteArray())
+                                                .build()
+                                        DownloadService.sendAddDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            downloadRequest,
+                                            false,
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    )
+                )
+            }
         }
 
         item { Spacer(modifier = Modifier.height(12.dp)) }

@@ -30,6 +30,8 @@ import com.metrolist.music.ui.screens.artist.ArtistItemsScreen
 import com.metrolist.music.ui.screens.artist.ArtistScreen
 import com.metrolist.music.ui.screens.artist.ArtistSongsScreen
 import com.metrolist.music.ui.screens.equalizer.EqScreen
+import com.metrolist.music.ui.screens.library.DownloadedScreen
+import com.metrolist.music.ui.screens.library.DownloadedVideosScreen
 import com.metrolist.music.ui.screens.library.LibraryScreen
 import com.metrolist.music.ui.screens.playlist.AutoPlaylistScreen
 import com.metrolist.music.ui.screens.playlist.CachePlaylistScreen
@@ -239,7 +241,7 @@ fun NavGraphBuilder.navigationBuilder(
     }
 
     composable(
-        route = "video/{videoId}?title={title}&artist={artist}",
+        route = "video/{videoId}?title={title}&artist={artist}&localUri={localUri}",
         arguments = listOf(
             navArgument("videoId") {
                 type = NavType.StringType
@@ -254,17 +256,32 @@ fun NavGraphBuilder.navigationBuilder(
                 nullable = true
                 defaultValue = null
             },
+            navArgument("localUri") {
+                type = NavType.StringType
+                nullable = true
+                defaultValue = null
+            },
         ),
     ) { backStackEntry ->
         val videoId = backStackEntry.arguments?.getString("videoId") ?: return@composable
         val title = backStackEntry.arguments?.getString("title")
         val artist = backStackEntry.arguments?.getString("artist")
+        val localUri = backStackEntry.arguments?.getString("localUri")
         VideoPlayerScreen(
             navController = navController,
             videoId = videoId,
             title = title,
-            artist = artist
+            artist = artist,
+            localUri = localUri
         )
+    }
+
+    composable("downloaded_videos") {
+        DownloadedVideosScreen(navController, scrollBehavior)
+    }
+
+    composable("downloaded") {
+        DownloadedScreen(navController, scrollBehavior)
     }
 
     composable(

@@ -61,6 +61,7 @@ import com.metrolist.music.ui.component.Material3MenuGroup
 import com.metrolist.music.ui.component.Material3MenuItemData
 import com.metrolist.music.ui.component.NewAction
 import com.metrolist.music.ui.component.NewActionGrid
+import com.metrolist.music.utils.MediaStoreHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -74,6 +75,7 @@ fun SelectionSongMenu(
     onDismiss: () -> Unit,
     clearAction: () -> Unit,
     songPosition: List<PlaylistSongMap>? = emptyList(),
+    isVideo: Boolean = false,
 ) {
     val context = LocalContext.current
     val database = LocalDatabase.current
@@ -83,6 +85,7 @@ fun SelectionSongMenu(
     val syncUtils = LocalSyncUtils.current
     val listenTogetherManager = com.metrolist.music.LocalListenTogetherManager.current
     val isGuest = listenTogetherManager?.isInRoom == true && listenTogetherManager.isHost == false
+    val mediaStoreHelper = remember { MediaStoreHelper(context) }
 
     val allInLibrary by remember {
         mutableStateOf(
@@ -100,12 +103,31 @@ fun SelectionSongMenu(
         )
     }
 
-    var downloadState by remember {
-        mutableIntStateOf(Download.STATE_STOPPED)
+    // Check if this is video context - use explicit parameter OR all songs have isVideo flag
+    val isVideoContext = isVideo || songSelection.all { it.song.isVideo }
+
+    // For video context, check mediaStoreUri first (most reliable), then isDownloaded flag
+    val videoDownloadState = remember(songSelection, isVideoContext) {
+        if (isVideoContext && songSelection.all { !it.song.mediaStoreUri.isNullOrBlank() || it.song.isDownloaded }) {
+            Download.STATE_COMPLETED
+        } else {
+            Download.STATE_STOPPED
+        }
     }
 
-    LaunchedEffect(songSelection) {
+    // Initialize downloadState with videoDownloadState for videos to avoid timing issues
+    var downloadState by remember(isVideoContext, videoDownloadState) {
+        mutableIntStateOf(if (isVideoContext) videoDownloadState else Download.STATE_STOPPED)
+    }
+
+    LaunchedEffect(songSelection, isVideoContext) {
         if (songSelection.isEmpty()) return@LaunchedEffect
+        if (isVideoContext) {
+            // For videos, use the computed videoDownloadState (already set in remember)
+            downloadState = videoDownloadState
+            return@LaunchedEffect
+        }
+        // For audio, check ExoPlayer downloads
         downloadUtil.downloads.collect { downloads ->
             downloadState =
                 if (songSelection.all { downloads[it.id]?.state == Download.STATE_COMPLETED }) {
@@ -174,14 +196,47 @@ fun SelectionSongMenu(
                 TextButton(
                     onClick = {
                         showRemoveDownloadDialog = false
-                        songSelection.forEach { song ->
-                            DownloadService.sendRemoveDownload(
-                                context,
-                                ExoDownloadService::class.java,
-                                song.song.id,
-                                false,
-                            )
+                        if (isVideoContext) {
+                            // Delete video downloads from MediaStore and clean up folders
+                            // Use MainScope to ensure coroutine isn't cancelled when menu dismisses
+                            kotlinx.coroutines.MainScope().launch(Dispatchers.IO) {
+                                songSelection.forEach { song ->
+                                    // Fetch fresh data from database to get correct URI
+                                    val freshSong = database.getSongById(song.id)
+                                    val uriToDelete = freshSong?.song?.mediaStoreUri
+                                        ?: song.song.mediaStoreUri
+
+                                    uriToDelete?.let { uriString ->
+                                        val uri = android.net.Uri.parse(uriString)
+                                        mediaStoreHelper.deleteVideoFromMediaStore(uri)
+                                    }
+                                    // Clear the database entry using withTransaction to wait for completion and trigger Flow invalidation
+                                    freshSong?.let { songData ->
+                                        database.withTransaction {
+                                            upsert(
+                                                songData.song.copy(
+                                                    isDownloaded = false,
+                                                    dateDownload = null,
+                                                    mediaStoreUri = null
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Delete audio downloads via ExoPlayer
+                            songSelection.forEach { song ->
+                                DownloadService.sendRemoveDownload(
+                                    context,
+                                    ExoDownloadService::class.java,
+                                    song.song.id,
+                                    false,
+                                )
+                            }
                         }
+                        onDismiss()
+                        clearAction()
                     },
                 ) {
                     Text(text = stringResource(android.R.string.ok))

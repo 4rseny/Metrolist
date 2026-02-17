@@ -12,6 +12,10 @@ import android.content.ClipboardManager
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
@@ -46,7 +50,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -89,6 +92,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -110,8 +114,18 @@ import com.metrolist.innertube.models.YouTubeClient
 import com.metrolist.music.LocalDatabase
 import com.metrolist.music.LocalPlayerConnection
 import com.metrolist.music.R
+import com.metrolist.music.ui.component.DefaultDialog
+import com.metrolist.music.db.entities.ArtistEntity
+import com.metrolist.music.db.entities.SongArtistMap
+import com.metrolist.music.db.entities.SongEntity
+import com.metrolist.music.utils.MediaStoreHelper
 import com.metrolist.music.utils.UrlValidator
 import com.metrolist.music.utils.YTPlayerUtils
+import kotlinx.coroutines.launch
+import okhttp3.Request
+import java.io.File
+import java.nio.ByteBuffer
+import java.time.LocalDateTime
 import io.sanghun.compose.video.RepeatMode
 import io.sanghun.compose.video.VideoPlayer
 import io.sanghun.compose.video.controller.VideoPlayerControllerConfig
@@ -131,6 +145,7 @@ fun VideoPlayerScreen(
     videoId: String,
     title: String? = null,
     artist: String? = null,
+    localUri: String? = null,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -169,6 +184,15 @@ fun VideoPlayerScreen(
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var videoBottomPx by remember { mutableStateOf<Int?>(null) }
 
+    // Download state
+    var showDownloadDialog by remember { mutableStateOf(false) }
+    var downloadQualities by remember { mutableStateOf<List<YTPlayerUtils.VideoQualityInfo>>(emptyList()) }
+    var isLoadingDownloadQualities by remember { mutableStateOf(false) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf<String?>(null) }
+
+    val mediaStoreHelper = remember { MediaStoreHelper(context) }
+
     // Auto-fullscreen on landscape orientation
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     LaunchedEffect(isLandscape, isFullscreen) {
@@ -199,7 +223,7 @@ fun VideoPlayerScreen(
 
     LaunchedEffect(videoId) {
         val mappedSong = withContext(Dispatchers.IO) {
-            val direct = database.getSongById(videoId)
+            val direct = database.getSongByIdBlocking(videoId)
             if (direct != null) return@withContext direct
             val setVideo = database.getSetVideoId(videoId)?.setVideoId
             if (setVideo != null) database.getSongById(setVideo) else null
@@ -338,11 +362,30 @@ fun VideoPlayerScreen(
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
 
-    LaunchedEffect(videoId, maxVideoBitrateKbps, reloadKey) {
+    LaunchedEffect(videoId, maxVideoBitrateKbps, reloadKey, localUri) {
         isLoading = true
         loadError = null
         videoItem = null
         adaptiveData = null
+
+        // If we have a local URI (downloaded video), play it directly
+        if (!localUri.isNullOrBlank()) {
+            val mediaMetadata = MediaMetadata.Builder()
+                .setTitle(currentTitle ?: videoId)
+                .apply {
+                    artistName?.let { setArtist(it) }
+                }
+                .build()
+
+            videoItem = VideoPlayerMediaItem.NetworkMediaItem(
+                url = localUri,
+                mediaMetadata = mediaMetadata,
+                mimeType = "video/mp4",
+                drmConfiguration = null
+            )
+            isLoading = false
+            return@LaunchedEffect
+        }
 
         // Try adaptive playback first (for 1080p+ support)
         // Quality selection is handled by the adaptive player, not by refetching
@@ -904,22 +947,100 @@ fun VideoPlayerScreen(
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        // Quality button
-                                        Surface(
-                                            shape = RoundedCornerShape(24.dp),
-                                            color = pillBg,
-                                            border = BorderStroke(1.dp, pillBorder),
-                                            modifier = Modifier.size(44.dp)
-                                        ) {
-                                            IconButton(onClick = {
-                                                markInteraction()
-                                                showQualityDialog = true
-                                            }) {
-                                                Icon(
-                                                    painter = painterResource(R.drawable.ic_video_hd),
-                                                    contentDescription = stringResource(R.string.video_quality)
-                                                )
+                                        // Only show download and quality buttons for streaming (not downloaded) videos
+                                        if (localUri.isNullOrBlank()) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            // Download button
+                                            Surface(
+                                                shape = RoundedCornerShape(24.dp),
+                                                color = pillBg,
+                                                border = BorderStroke(1.dp, pillBorder),
+                                                modifier = Modifier.size(44.dp)
+                                            ) {
+                                                IconButton(
+                                                    onClick = {
+                                                        markInteraction()
+                                                        if (!isDownloading) {
+                                                            isLoadingDownloadQualities = true
+                                                            showDownloadDialog = true
+                                                            scope.launch {
+                                                                try {
+                                                                    // Use getAdaptiveVideoData to fetch available qualities
+                                                                    val adaptiveData = withContext(Dispatchers.IO) {
+                                                                        YTPlayerUtils.getAdaptiveVideoData(
+                                                                            videoId = videoId,
+                                                                            targetHeight = null,
+                                                                            preferMp4 = true
+                                                                        ).getOrNull()
+                                                                    }
+                                                                    downloadQualities = adaptiveData?.availableQualities ?: emptyList()
+                                                                } catch (e: Exception) {
+                                                                    e.printStackTrace()
+                                                                } finally {
+                                                                    isLoadingDownloadQualities = false
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                    enabled = !isDownloading
+                                                ) {
+                                                    if (isDownloading) {
+                                                        // Parse percentage from progress string (e.g., "Downloading 1080p: 45%")
+                                                        val progressPercent = downloadProgress?.let { progress ->
+                                                            val match = Regex("(\\d+)%").find(progress)
+                                                            match?.groupValues?.get(1)?.toIntOrNull()
+                                                        }
+                                                        Box(
+                                                            contentAlignment = Alignment.Center,
+                                                            modifier = Modifier.size(28.dp)
+                                                        ) {
+                                                            if (progressPercent != null) {
+                                                                CircularProgressIndicator(
+                                                                    progress = { progressPercent / 100f },
+                                                                    modifier = Modifier.size(28.dp),
+                                                                    color = Color.White,
+                                                                    trackColor = Color.White.copy(alpha = 0.3f),
+                                                                    strokeWidth = 2.dp
+                                                                )
+                                                                Text(
+                                                                    text = "$progressPercent",
+                                                                    color = Color.White,
+                                                                    style = MaterialTheme.typography.labelSmall,
+                                                                    fontSize = 8.sp
+                                                                )
+                                                            } else {
+                                                                CircularProgressIndicator(
+                                                                    modifier = Modifier.size(20.dp),
+                                                                    color = Color.White,
+                                                                    strokeWidth = 2.dp
+                                                                )
+                                                            }
+                                                        }
+                                                    } else {
+                                                        Icon(
+                                                            painter = painterResource(R.drawable.download),
+                                                            contentDescription = stringResource(R.string.video_download)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            // Quality button
+                                            Surface(
+                                                shape = RoundedCornerShape(24.dp),
+                                                color = pillBg,
+                                                border = BorderStroke(1.dp, pillBorder),
+                                                modifier = Modifier.size(44.dp)
+                                            ) {
+                                                IconButton(onClick = {
+                                                    markInteraction()
+                                                    showQualityDialog = true
+                                                }) {
+                                                    Icon(
+                                                        painter = painterResource(R.drawable.ic_video_hd),
+                                                        contentDescription = stringResource(R.string.video_quality)
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1070,66 +1191,123 @@ fun VideoPlayerScreen(
 
     if (showSpeedDialog) {
         val speeds = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
-        AlertDialog(
-            onDismissRequest = { showSpeedDialog = false },
-            title = { Text("Playback speed") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    speeds.forEach { speed ->
-                        TextButton(onClick = {
+        val currentSpeed = playerInstance?.playbackParameters?.speed ?: 1f
+        DefaultDialog(
+            onDismiss = { showSpeedDialog = false },
+            title = { Text(stringResource(R.string.playback_speed)) },
+            buttons = {
+                TextButton(onClick = { showSpeedDialog = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            }
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                speeds.forEach { speed ->
+                    Surface(
+                        onClick = {
                             playerInstance?.setPlaybackSpeed(speed)
                             showSpeedDialog = false
-                        }) {
-                            Text(if (speed == 1f) "1.0x (Normal)" else "${speed}x")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (currentSpeed == speed)
+                            MaterialTheme.colorScheme.primaryContainer
+                        else
+                            MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = if (speed == 1f) "1.0x (Normal)" else "${speed}x",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            if (currentSpeed == speed) {
+                                Icon(
+                                    painter = painterResource(R.drawable.done),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showSpeedDialog = false }) { Text("Close") }
             }
-        )
+        }
     }
 
     if (showQualityDialog) {
-        AlertDialog(
-            onDismissRequest = { showQualityDialog = false },
-            title = { Text("Video quality") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // Show current playing quality
-                    val playingQuality = adaptiveData?.videoFormat?.height ?: selectedQualityHeight
-                    Text(
-                        text = "Playing: ${playingQuality}p",
-                        style = MaterialTheme.typography.labelMedium
-                    )
+        val playingQuality = adaptiveData?.videoFormat?.height ?: selectedQualityHeight
+        DefaultDialog(
+            onDismiss = { showQualityDialog = false },
+            title = { Text(stringResource(R.string.video_quality)) },
+            buttons = {
+                TextButton(onClick = { showQualityDialog = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            }
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Show current playing quality
+                Text(
+                    text = "Playing: ${playingQuality}p",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
 
-                    // Use adaptive qualities if available (1080p+ support)
-                    if (adaptiveQualities.isNotEmpty()) {
-                        // Quality options (no "auto" - default is 1080p or highest below)
-                        adaptiveQualities.forEach { quality ->
-                            TextButton(
-                                onClick = {
-                                    selectedQualityHeight = quality.height
-                                    showQualityDialog = false
-                                },
-                                modifier = Modifier.fillMaxWidth()
+                // Use adaptive qualities if available (1080p+ support)
+                if (adaptiveQualities.isNotEmpty()) {
+                    adaptiveQualities.forEach { quality ->
+                        Surface(
+                            onClick = {
+                                selectedQualityHeight = quality.height
+                                showQualityDialog = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (playingQuality == quality.height)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(quality.label)
-                                    if (playingQuality == quality.height) {
-                                        Text("✓", fontWeight = FontWeight.Bold)
-                                    }
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_video_hd),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${quality.height}p",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        text = quality.label,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (playingQuality == quality.height) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.done),
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
                                 }
                             }
                         }
-                    } else if (availableQualities.isNotEmpty()) {
-                        // Fallback to ExoPlayer track selection (progressive streams)
-                        TextButton(onClick = {
+                    }
+                } else if (availableQualities.isNotEmpty()) {
+                    // Fallback to ExoPlayer track selection (progressive streams)
+                    Surface(
+                        onClick = {
                             playerInstance?.let { player ->
                                 val params = player.trackSelectionParameters
                                     .buildUpon()
@@ -1139,11 +1317,32 @@ fun VideoPlayerScreen(
                             }
                             selectedQualityId = "auto"
                             showQualityDialog = false
-                        }) {
-                            Text("Auto")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (selectedQualityId == "auto")
+                            MaterialTheme.colorScheme.primaryContainer
+                        else
+                            MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Auto", style = MaterialTheme.typography.titleMedium)
+                            if (selectedQualityId == "auto") {
+                                Icon(
+                                    painter = painterResource(R.drawable.done),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
-                        availableQualities.forEach { option ->
-                            TextButton(onClick = {
+                    }
+                    availableQualities.forEach { option ->
+                        Surface(
+                            onClick = {
                                 playerInstance?.let { player ->
                                     val builder = player.trackSelectionParameters
                                         .buildUpon()
@@ -1155,20 +1354,583 @@ fun VideoPlayerScreen(
                                     selectedQualityId = option.id
                                 }
                                 showQualityDialog = false
-                            }) {
-                                Text(option.label.ifBlank { "Track ${option.trackIndex + 1}" })
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (selectedQualityId == option.id)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = option.label.ifBlank { "Track ${option.trackIndex + 1}" },
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                if (selectedQualityId == option.id) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.done),
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         }
-                    } else {
-                        Text("No quality options available", style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text(
+                        text = stringResource(R.string.no_video_qualities),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            }
+        }
+    }
+
+    // Fetch download qualities when dialog opens
+    LaunchedEffect(showDownloadDialog) {
+        if (showDownloadDialog && downloadQualities.isEmpty() && !isLoadingDownloadQualities) {
+            isLoadingDownloadQualities = true
+            val result = withContext(Dispatchers.IO) {
+                YTPlayerUtils.getAdaptiveVideoData(videoId, targetHeight = null, preferMp4 = true)
+            }
+            result.onSuccess { data ->
+                downloadQualities = data.availableQualities
+            }
+            isLoadingDownloadQualities = false
+        }
+    }
+
+    // Download dialog
+    if (showDownloadDialog) {
+        DefaultDialog(
+            onDismiss = { showDownloadDialog = false },
+            title = { Text(stringResource(R.string.video_download_quality)) },
+            buttons = {
+                TextButton(onClick = { showDownloadDialog = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            }
+        ) {
+            if (isLoadingDownloadQualities) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                }
+            } else if (downloadQualities.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    downloadQualities.forEach { quality ->
+                        Surface(
+                            onClick = {
+                                showDownloadDialog = false
+                                downloadVideo(
+                                    context = context,
+                                    videoId = videoId,
+                                    targetHeight = quality.height,
+                                    title = currentTitle ?: videoId,
+                                    artist = artistName ?: "",
+                                    durationSec = (durationMs / 1000).toInt(),
+                                    database = database,
+                                    mediaStoreHelper = mediaStoreHelper,
+                                    scope = scope,
+                                    onStart = {
+                                        isDownloading = true
+                                        downloadProgress = context.getString(R.string.video_downloading)
+                                    },
+                                    onProgress = { progress -> downloadProgress = progress },
+                                    onComplete = { success, message ->
+                                        isDownloading = false
+                                        downloadProgress = null
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                )
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = quality.label,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                            )
+                        }
                     }
                 }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showQualityDialog = false }) { Text("Close") }
+            } else {
+                Text(
+                    text = stringResource(R.string.video_error),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
+        }
+    }
+}
+
+fun downloadVideo(
+    context: android.content.Context,
+    videoId: String,
+    targetHeight: Int,
+    title: String,
+    artist: String,
+    durationSec: Int = -1,
+    database: com.metrolist.music.db.MusicDatabase,
+    mediaStoreHelper: MediaStoreHelper,
+    scope: kotlinx.coroutines.CoroutineScope? = null,
+    onStart: () -> Unit = {},
+    onProgress: (String) -> Unit,
+    onComplete: (success: Boolean, message: String) -> Unit,
+) {
+    val coroutineScope = scope ?: kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+    coroutineScope.launch {
+        onStart()
+        try {
+            val useProgressive = targetHeight <= 720
+
+            if (useProgressive) {
+                // Progressive download (720p and below)
+                downloadProgressiveVideo(
+                    context, videoId, targetHeight, title, artist, durationSec,
+                    database, mediaStoreHelper, onProgress, onComplete
+                )
+            } else {
+                // Adaptive download with muxing (1080p+)
+                downloadAdaptiveVideo(
+                    context, videoId, targetHeight, title, artist, durationSec,
+                    database, mediaStoreHelper, onProgress, onComplete
+                )
+            }
+        } catch (e: Exception) {
+            Timber.tag("VideoDownload").e(e, "Download failed")
+            onComplete(false, context.getString(R.string.video_download_failed))
+        }
+    }
+}
+
+private suspend fun downloadProgressiveVideo(
+    context: android.content.Context,
+    videoId: String,
+    targetHeight: Int,
+    title: String,
+    artist: String,
+    durationSec: Int,
+    database: com.metrolist.music.db.MusicDatabase,
+    mediaStoreHelper: MediaStoreHelper,
+    onProgress: (String) -> Unit,
+    onComplete: (success: Boolean, message: String) -> Unit,
+) = withContext(Dispatchers.IO) {
+    try {
+        val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
+            ?: throw Exception("No connectivity manager")
+
+        val bitrateKbps = when {
+            targetHeight >= 720 -> 2500
+            targetHeight >= 480 -> 1000
+            else -> 500
+        }
+
+        onProgress("Fetching stream...")
+
+        val playback = YTPlayerUtils.playerResponseForVideoPlayback(
+            videoId = videoId,
+            connectivityManager = connectivityManager,
+            maxVideoBitrateKbps = bitrateKbps,
+            isVideoFallback = false
+        ).getOrThrow()
+
+        val streamUrl = UrlValidator.validateAndParseUrl(playback.streamUrl)?.toString()
+            ?: throw Exception("Invalid stream URL")
+
+        val qualityLabel = playback.format.height?.let { "${it}p" } ?: "${targetHeight}p"
+
+        onProgress("Downloading ${qualityLabel}...")
+
+        val httpClient = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.MINUTES)
+            .build()
+
+        val tempFile = File(context.cacheDir, "temp_video_$videoId.mp4")
+
+        val request = Request.Builder().url(streamUrl).build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+            val contentLength = response.body?.contentLength() ?: -1L
+            response.body?.byteStream()?.use { input ->
+                tempFile.outputStream().use { output ->
+                    copyWithProgress(input, output, contentLength) { percent ->
+                        withContext(Dispatchers.Main) {
+                            onProgress("Downloading $qualityLabel: $percent%")
+                        }
+                    }
+                }
+            }
+        }
+
+        withContext(Dispatchers.Main) { onProgress("Saving...") }
+
+        val fileName = "$title ($qualityLabel).mp4".take(200)
+        val uri = mediaStoreHelper.saveVideoToMediaStore(
+            tempFile = tempFile,
+            fileName = fileName,
+            mimeType = "video/mp4",
+            title = title,
+            artist = artist,
+            durationMs = durationSec * 1000L
         )
+
+        tempFile.delete()
+
+        if (uri != null) {
+            database.withTransaction {
+                // Insert or update song entry
+                val existingSong = getSongByIdBlocking(videoId)
+                if (existingSong != null) {
+                    // For existing songs (like live performances), only update mediaStoreUri
+                    // Don't change isVideo flag so audio downloads still work
+                    updateMediaStoreUri(
+                        songId = videoId,
+                        mediaStoreUri = uri.toString()
+                    )
+                } else {
+                    insert(
+                        SongEntity(
+                            id = videoId,
+                            title = title,
+                            duration = durationSec,
+                            thumbnailUrl = playback.videoDetails?.thumbnail?.thumbnails?.lastOrNull()?.url,
+                            explicit = false,
+                            dateDownload = LocalDateTime.now(),
+                            isDownloaded = true,
+                            isVideo = true,
+                            mediaStoreUri = uri.toString()
+                        )
+                    )
+                }
+                // Always ensure artist association exists (IGNORE handles duplicates)
+                // Use videoDetails.channelId and author, or fall back to the passed artist parameter
+                val channelId = playback.videoDetails?.channelId
+                val authorName = playback.videoDetails?.author ?: artist.takeIf { it.isNotBlank() }
+                if (channelId != null && authorName != null) {
+                    insert(ArtistEntity(id = channelId, name = authorName))
+                    insert(SongArtistMap(songId = videoId, artistId = channelId, position = 0))
+                }
+            }
+            withContext(Dispatchers.Main) { onComplete(true, context.getString(R.string.video_download_complete)) }
+        } else {
+            withContext(Dispatchers.Main) { onComplete(false, context.getString(R.string.video_download_failed)) }
+        }
+    } catch (e: Exception) {
+        Timber.tag("VideoDownload").e(e, "Progressive download failed")
+        withContext(Dispatchers.Main) { onComplete(false, context.getString(R.string.video_download_failed)) }
+    }
+}
+
+private suspend fun downloadAdaptiveVideo(
+    context: android.content.Context,
+    videoId: String,
+    targetHeight: Int,
+    title: String,
+    artist: String,
+    durationSec: Int,
+    database: com.metrolist.music.db.MusicDatabase,
+    mediaStoreHelper: MediaStoreHelper,
+    onProgress: (String) -> Unit,
+    onComplete: (success: Boolean, message: String) -> Unit,
+) = withContext(Dispatchers.IO) {
+    try {
+        onProgress("Fetching streams...")
+
+        val adaptiveResult = YTPlayerUtils.getAdaptiveVideoData(
+            videoId = videoId,
+            targetHeight = targetHeight,
+            preferMp4 = true
+        )
+
+        adaptiveResult.onSuccess { adaptive ->
+            val videoUrl = UrlValidator.validateAndParseUrl(adaptive.videoUrl)?.toString()
+                ?: throw Exception("Invalid video URL")
+            val audioUrl = UrlValidator.validateAndParseUrl(adaptive.audioUrl)?.toString()
+                ?: throw Exception("Invalid audio URL")
+
+            val qualityLabel = "${adaptive.videoFormat.height}p"
+
+            val httpClient = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.MINUTES)
+                .build()
+
+            val requestHeaders = mutableMapOf(
+                "Origin" to "https://www.youtube.com",
+                "Referer" to "https://www.youtube.com/",
+                "User-Agent" to com.metrolist.innertube.models.YouTubeClient.USER_AGENT_WEB
+            )
+            YouTube.cookie?.let { requestHeaders["Cookie"] = it }
+
+            val tempVideoFile = File(context.cacheDir, "temp_video_${videoId}_video.mp4")
+            val tempAudioFile = File(context.cacheDir, "temp_video_${videoId}_audio.m4a")
+            val tempMuxedFile = File(context.cacheDir, "temp_video_${videoId}_muxed.mp4")
+
+            // Get content lengths for progress tracking
+            val videoHeadRequest = Request.Builder()
+                .url(videoUrl)
+                .head()
+                .apply { requestHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+            val audioHeadRequest = Request.Builder()
+                .url(audioUrl)
+                .head()
+                .apply { requestHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+
+            val videoSize = try {
+                httpClient.newCall(videoHeadRequest).execute().use { it.header("Content-Length")?.toLongOrNull() ?: -1L }
+            } catch (e: Exception) { -1L }
+            val audioSize = try {
+                httpClient.newCall(audioHeadRequest).execute().use { it.header("Content-Length")?.toLongOrNull() ?: -1L }
+            } catch (e: Exception) { -1L }
+
+            val totalSize = if (videoSize > 0 && audioSize > 0) videoSize + audioSize else -1L
+            var downloadedBytes = 0L
+
+            // Download video stream
+            val videoRequest = Request.Builder()
+                .url(videoUrl)
+                .apply { requestHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+
+            httpClient.newCall(videoRequest).execute().use { response ->
+                if (!response.isSuccessful) throw Exception("Video download failed: HTTP ${response.code}")
+                val contentLength = response.body?.contentLength() ?: videoSize
+                response.body?.byteStream()?.use { input ->
+                    tempVideoFile.outputStream().use { output ->
+                        copyWithProgress(input, output, contentLength) { percent ->
+                            val overallPercent = if (totalSize > 0) {
+                                ((downloadedBytes + (contentLength * percent / 100)) * 100 / totalSize).toInt()
+                            } else {
+                                percent / 2  // Estimate 50% for video
+                            }
+                            withContext(Dispatchers.Main) {
+                                onProgress("Downloading $qualityLabel: $overallPercent%")
+                            }
+                        }
+                    }
+                }
+                downloadedBytes += contentLength
+            }
+
+            // Download audio stream
+            val audioRequest = Request.Builder()
+                .url(audioUrl)
+                .apply { requestHeaders.forEach { (k, v) -> addHeader(k, v) } }
+                .build()
+
+            httpClient.newCall(audioRequest).execute().use { response ->
+                if (!response.isSuccessful) throw Exception("Audio download failed: HTTP ${response.code}")
+                val contentLength = response.body?.contentLength() ?: audioSize
+                response.body?.byteStream()?.use { input ->
+                    tempAudioFile.outputStream().use { output ->
+                        copyWithProgress(input, output, contentLength) { percent ->
+                            val overallPercent = if (totalSize > 0) {
+                                ((downloadedBytes + (contentLength * percent / 100)) * 100 / totalSize).toInt()
+                            } else {
+                                50 + percent / 2  // Estimate 50-100% for audio
+                            }
+                            withContext(Dispatchers.Main) {
+                                onProgress("Downloading $qualityLabel: $overallPercent%")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Mux video and audio
+            withContext(Dispatchers.Main) { onProgress(context.getString(R.string.video_muxing)) }
+            muxVideoAudio(tempVideoFile, tempAudioFile, tempMuxedFile)
+
+            withContext(Dispatchers.Main) { onProgress("Saving...") }
+            val fileName = "$title ($qualityLabel).mp4".take(200)
+            val uri = mediaStoreHelper.saveVideoToMediaStore(
+                tempFile = tempMuxedFile,
+                fileName = fileName,
+                mimeType = "video/mp4",
+                title = title,
+                artist = artist,
+                durationMs = durationSec * 1000L
+            )
+
+            // Clean up temp files
+            tempVideoFile.delete()
+            tempAudioFile.delete()
+            tempMuxedFile.delete()
+
+            if (uri != null) {
+                database.withTransaction {
+                    // Insert or update song entry
+                    val existingSong = getSongByIdBlocking(videoId)
+                    if (existingSong != null) {
+                        // For existing songs (like live performances), only update mediaStoreUri
+                        // Don't change isVideo flag so audio downloads still work
+                        updateMediaStoreUri(
+                            songId = videoId,
+                            mediaStoreUri = uri.toString()
+                        )
+                    } else {
+                        insert(
+                            SongEntity(
+                                id = videoId,
+                                title = title,
+                                duration = durationSec,
+                                thumbnailUrl = adaptive.videoDetails?.thumbnail?.thumbnails?.lastOrNull()?.url,
+                                explicit = false,
+                                dateDownload = LocalDateTime.now(),
+                                isDownloaded = true,
+                                isVideo = true,
+                                mediaStoreUri = uri.toString()
+                            )
+                        )
+                    }
+                    // Always ensure artist association exists (IGNORE handles duplicates)
+                    // Use videoDetails.channelId and author, or fall back to the passed artist parameter
+                    val channelId = adaptive.videoDetails?.channelId
+                    val authorName = adaptive.videoDetails?.author ?: artist.takeIf { it.isNotBlank() }
+                    if (channelId != null && authorName != null) {
+                        insert(ArtistEntity(id = channelId, name = authorName))
+                        insert(SongArtistMap(songId = videoId, artistId = channelId, position = 0))
+                    }
+                }
+                withContext(Dispatchers.Main) { onComplete(true, context.getString(R.string.video_download_complete)) }
+            } else {
+                withContext(Dispatchers.Main) { onComplete(false, context.getString(R.string.video_download_failed)) }
+            }
+        }.onFailure { e ->
+            Timber.tag("VideoDownload").e(e, "Adaptive download failed")
+            withContext(Dispatchers.Main) { onComplete(false, context.getString(R.string.video_download_failed)) }
+        }
+    } catch (e: Exception) {
+        Timber.tag("VideoDownload").e(e, "Adaptive download failed")
+        withContext(Dispatchers.Main) { onComplete(false, context.getString(R.string.video_download_failed)) }
+    }
+}
+
+private fun muxVideoAudio(videoFile: File, audioFile: File, outputFile: File) {
+    val videoExtractor = MediaExtractor()
+    val audioExtractor = MediaExtractor()
+
+    try {
+        videoExtractor.setDataSource(videoFile.absolutePath)
+        audioExtractor.setDataSource(audioFile.absolutePath)
+
+        val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+        // Add video track
+        var videoTrackIndex = -1
+        for (i in 0 until videoExtractor.trackCount) {
+            val format = videoExtractor.getTrackFormat(i)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith("video/")) {
+                videoExtractor.selectTrack(i)
+                videoTrackIndex = muxer.addTrack(format)
+                break
+            }
+        }
+
+        // Add audio track
+        var audioTrackIndex = -1
+        for (i in 0 until audioExtractor.trackCount) {
+            val format = audioExtractor.getTrackFormat(i)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith("audio/")) {
+                audioExtractor.selectTrack(i)
+                audioTrackIndex = muxer.addTrack(format)
+                break
+            }
+        }
+
+        if (videoTrackIndex < 0 || audioTrackIndex < 0) {
+            throw Exception("Could not find video or audio track")
+        }
+
+        muxer.start()
+
+        val bufferSize = 1024 * 1024 // 1MB buffer
+        val buffer = ByteBuffer.allocate(bufferSize)
+        val bufferInfo = MediaCodec.BufferInfo()
+
+        // Write video samples
+        while (true) {
+            buffer.clear()
+            val sampleSize = videoExtractor.readSampleData(buffer, 0)
+            if (sampleSize < 0) break
+
+            bufferInfo.offset = 0
+            bufferInfo.size = sampleSize
+            bufferInfo.presentationTimeUs = videoExtractor.sampleTime
+            bufferInfo.flags = videoExtractor.sampleFlags
+
+            muxer.writeSampleData(videoTrackIndex, buffer, bufferInfo)
+            videoExtractor.advance()
+        }
+
+        // Write audio samples
+        while (true) {
+            buffer.clear()
+            val sampleSize = audioExtractor.readSampleData(buffer, 0)
+            if (sampleSize < 0) break
+
+            bufferInfo.offset = 0
+            bufferInfo.size = sampleSize
+            bufferInfo.presentationTimeUs = audioExtractor.sampleTime
+            bufferInfo.flags = audioExtractor.sampleFlags
+
+            muxer.writeSampleData(audioTrackIndex, buffer, bufferInfo)
+            audioExtractor.advance()
+        }
+
+        muxer.stop()
+        muxer.release()
+    } finally {
+        videoExtractor.release()
+        audioExtractor.release()
+    }
+}
+
+private suspend fun copyWithProgress(
+    input: java.io.InputStream,
+    output: java.io.OutputStream,
+    totalBytes: Long,
+    onProgress: suspend (Int) -> Unit
+) {
+    val buffer = ByteArray(8192)
+    var bytesRead: Int
+    var totalRead = 0L
+    var lastReportedPercent = -1
+
+    while (input.read(buffer).also { bytesRead = it } != -1) {
+        output.write(buffer, 0, bytesRead)
+        totalRead += bytesRead
+
+        if (totalBytes > 0) {
+            val percent = ((totalRead * 100) / totalBytes).toInt().coerceIn(0, 100)
+            if (percent != lastReportedPercent && percent % 5 == 0) {
+                lastReportedPercent = percent
+                onProgress(percent)
+            }
+        }
+    }
+    // Final progress update
+    if (totalBytes > 0 && lastReportedPercent != 100) {
+        onProgress(100)
     }
 }
 

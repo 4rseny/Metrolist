@@ -342,7 +342,7 @@ fun LibraryMixScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        navController.navigate("auto_playlist/downloaded")
+                                        navController.navigate("downloaded")
                                     }
                                     .animateItem(),
                             )
@@ -609,7 +609,7 @@ fun LibraryMixScreen(
                                     .fillMaxWidth()
                                     .combinedClickable(
                                         onClick = {
-                                            navController.navigate("auto_playlist/downloaded")
+                                            navController.navigate("downloaded")
                                         },
                                     )
                                     .animateItem(),

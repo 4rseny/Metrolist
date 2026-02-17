@@ -728,7 +728,25 @@
     <string name="video_next">Next</string>
     <string name="video_play">Play</string>
     <string name="video_pause">Pause</string>
+    <string name="playback_speed">Playback speed</string>
     <string name="video_loading">Loading video</string>
     <string name="video_error">Failed to load video</string>
     <string name="video_copied_link">Video link copied</string>
+    <string name="video_download">Download video</string>
+    <string name="video_download_quality">Select quality</string>
+    <string name="video_downloading">Downloading video</string>
+    <string name="video_download_complete">Video saved to Movies/Metrolist</string>
+    <string name="video_download_failed">Video download failed</string>
+    <string name="background">Background</string>
+    <string name="no_video_qualities">No video qualities available</string>
+    <string name="video_muxing">Processing video</string>
+    <string name="downloaded_videos">Downloaded Videos</string>
+    <string name="no_downloaded_videos">No downloaded videos</string>
+    <string name="music">Music</string>
+    <string name="videos">Videos</string>
+    <string name="play_as_song">Play as song</string>
+    <string name="play_as_video">Play as video</string>
+    <string name="download_song">Download song</string>
+    <string name="live_performance">Live Performance</string>
+    <string name="choose_playback_type">Choose playback type</string>
 </resources>
