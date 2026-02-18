@@ -130,6 +130,15 @@ class App : Application(), SingletonImageLoader.Factory {
 
         YouTube.useLoginForBrowse = settings[UseLoginForBrowse] ?: true
 
+        // Initialize anonymous login if enabled (uses direct requests with worker credentials)
+        if (settings[AnonLoginEnabledKey] == true) {
+            YouTube.isAnonLogin = true
+            YouTube.anonWorkerUrl = null  // Use direct requests, not proxied
+            // Fetch fresh visitorData for PoToken generation
+            YouTube.fetchFreshVisitorData()
+            Timber.d("Anonymous login initialized - isAnonLogin=true, appVisitorData=${YouTube.appVisitorData?.take(30)}...")
+        }
+
         val channel = NotificationChannel(
             "updates",
             getString(R.string.update_channel_name),
@@ -192,6 +201,27 @@ class App : Application(), SingletonImageLoader.Factory {
                         LastFM.sessionKey = session
                     } catch (e: Exception) {
                         Timber.e("Error while loading last.fm session key. %s", e.message)
+                    }
+                }
+        }
+
+        // Observe anonymous login settings
+        applicationScope.launch(Dispatchers.IO) {
+            dataStore.data
+                .map { it[AnonLoginEnabledKey] }
+                .distinctUntilChanged()
+                .collect { enabled ->
+                    if (enabled == true) {
+                        YouTube.isAnonLogin = true
+                        YouTube.anonWorkerUrl = null  // Use direct requests
+                        // Fetch fresh visitorData for PoToken if not already set
+                        if (YouTube.appVisitorData == null) {
+                            YouTube.fetchFreshVisitorData()
+                        }
+                    } else {
+                        YouTube.isAnonLogin = false
+                        YouTube.appVisitorData = null
+                        YouTube.anonWorkerUrl = null
                     }
                 }
         }

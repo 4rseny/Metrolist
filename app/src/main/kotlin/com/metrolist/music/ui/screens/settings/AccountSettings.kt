@@ -32,6 +32,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +55,9 @@ import com.metrolist.music.R
 import com.metrolist.music.constants.AccountChannelHandleKey
 import com.metrolist.music.constants.AccountEmailKey
 import com.metrolist.music.constants.AccountNameKey
+import com.metrolist.music.constants.AnonLoginEnabledKey
+import com.metrolist.music.constants.AnonWorkerUrlKey
+import com.metrolist.music.constants.DEFAULT_ANON_WORKER_URL
 import com.metrolist.music.constants.DataSyncIdKey
 import com.metrolist.music.constants.InnerTubeCookieKey
 import com.metrolist.music.constants.UseLoginForBrowse
@@ -89,6 +93,10 @@ fun AccountSettings(
     }
     val (useLoginForBrowse, onUseLoginForBrowseChange) = rememberPreference(UseLoginForBrowse, true)
     val (ytmSync, onYtmSyncChange) = rememberPreference(YtmSyncKey, true)
+
+    // Anonymous login
+    val (anonLoginEnabled, onAnonLoginEnabledChange) = rememberPreference(AnonLoginEnabledKey, false)
+    val (anonWorkerUrl, onAnonWorkerUrlChange) = rememberPreference(AnonWorkerUrlKey, DEFAULT_ANON_WORKER_URL)
 
     val homeViewModel: HomeViewModel = hiltViewModel()
     val accountSettingsViewModel: AccountSettingsViewModel = hiltViewModel()
@@ -169,7 +177,7 @@ fun AccountSettings(
             if (isLoggedIn) {
                 OutlinedButton(
                     onClick = {
-                        accountSettingsViewModel.logoutAndClearSyncedContent(context, onInnerTubeCookieChange)
+                        accountSettingsViewModel.logoutAndClearSyncedContent(context, onInnerTubeCookieChange, onAnonLoginEnabledChange)
                     },
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -234,6 +242,33 @@ fun AccountSettings(
                 if (!isLoggedIn) showTokenEditor = true
                 else if (!showToken) showToken = true
                 else showTokenEditor = true
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surface)
+        )
+
+        Spacer(Modifier.height(4.dp))
+
+        // Anonymous login option (alternative to Google login)
+        SwitchPreference(
+            title = { Text(stringResource(R.string.anon_login)) },
+            description = stringResource(R.string.anon_login_description),
+            icon = { Icon(painterResource(R.drawable.cloud), null) },
+            checked = anonLoginEnabled,
+            onCheckedChange = { enabled ->
+                if (enabled) {
+                    // Enable anon login (clears Google login if present)
+                    accountSettingsViewModel.enableAnonLogin(context) {
+                        onAnonLoginEnabledChange(true)
+                    }
+                } else {
+                    // Disable anon login
+                    accountSettingsViewModel.disableAnonLogin(context) {
+                        onAnonLoginEnabledChange(false)
+                    }
+                }
             },
             modifier = Modifier
                 .fillMaxWidth()

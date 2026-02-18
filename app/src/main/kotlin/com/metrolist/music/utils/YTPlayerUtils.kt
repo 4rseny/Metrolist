@@ -94,7 +94,14 @@ object YTPlayerUtils {
 
         // Generate PoToken
         var poToken: PoTokenResult? = null
-        val sessionId = if (isLoggedIn) YouTube.dataSyncId else YouTube.visitorData
+        // For logged-in users (including anon login with worker credentials), use dataSyncId
+        // dataSyncId is the account identifier and should be used for PoToken when available
+        val sessionId = if (isLoggedIn) {
+            YouTube.dataSyncId ?: YouTube.visitorData
+        } else {
+            YouTube.visitorData
+        }
+        Timber.tag(logTag).d("PoToken sessionId: hasSessionId=${sessionId != null}, isAnonLogin=${YouTube.isAnonLogin}, usingDataSyncId=${sessionId == YouTube.dataSyncId}")
         if (MAIN_CLIENT.useWebPoTokens && sessionId != null) {
             Timber.tag(logTag).d("Generating PoToken for WEB_REMIX with sessionId")
             try {
@@ -290,15 +297,26 @@ object YTPlayerUtils {
                 // Check if this is a privately owned track (uploaded song)
                 val isPrivatelyOwned = streamPlayerResponse.videoDetails?.musicVideoType == "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK"
 
-                if (clientIndex == STREAM_FALLBACK_CLIENTS.size - 1 || isPrivatelyOwned) {
-                    /** skip [validateStatus] for last client or private tracks */
-                    if (isPrivatelyOwned) {
-                        Timber.tag(logTag).d("Skipping validation for privately owned track: ${currentClient.clientName}")
-                        println("[PLAYBACK_DEBUG] Using stream without validation for PRIVATELY_OWNED_TRACK")
-                    } else {
-                        Timber.tag(logTag).d("Using last fallback client without validation: ${STREAM_FALLBACK_CLIENTS[clientIndex].clientName}")
+                // Skip validation for: last client, private tracks, or WEB_REMIX with anon login
+                // For anon login, HEAD validation returns 403 but actual playback may work
+                val skipValidation = clientIndex == STREAM_FALLBACK_CLIENTS.size - 1 ||
+                    isPrivatelyOwned ||
+                    (clientIndex == -1 && YouTube.isAnonLogin)
+
+                if (skipValidation) {
+                    when {
+                        isPrivatelyOwned -> {
+                            Timber.tag(logTag).d("Skipping validation for privately owned track: ${currentClient.clientName}")
+                            println("[PLAYBACK_DEBUG] Using stream without validation for PRIVATELY_OWNED_TRACK")
+                        }
+                        YouTube.isAnonLogin && clientIndex == -1 -> {
+                            Timber.tag(logTag).d("Skipping validation for WEB_REMIX with anon login - trying direct playback")
+                        }
+                        else -> {
+                            Timber.tag(logTag).d("Using last fallback client without validation: ${STREAM_FALLBACK_CLIENTS[clientIndex].clientName}")
+                        }
                     }
-                    Log.i(TAG, "Playback: client=${currentClient.clientName}, videoId=$videoId, private=$isPrivatelyOwned")
+                    Log.i(TAG, "Playback: client=${currentClient.clientName}, videoId=$videoId, private=$isPrivatelyOwned, anonLogin=${YouTube.isAnonLogin}")
                     break
                 }
 

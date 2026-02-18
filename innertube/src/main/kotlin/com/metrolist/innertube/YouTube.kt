@@ -118,6 +118,29 @@ object YouTube {
             innerTube.useLoginForBrowse = value
         }
 
+    var anonWorkerUrl: String?
+        get() = innerTube.anonWorkerUrl
+        set(value) {
+            innerTube.anonWorkerUrl = value
+        }
+
+    val isAnonLoginEnabled: Boolean
+        get() = innerTube.isAnonLoginEnabled
+
+    var isAnonLogin: Boolean
+        get() = innerTube.isAnonLogin
+        set(value) {
+            innerTube.isAnonLogin = value
+        }
+
+    var appVisitorData: String?
+        get() = innerTube.appVisitorData
+        set(value) {
+            innerTube.appVisitorData = value
+        }
+
+    suspend fun fetchFreshVisitorData(): String? = innerTube.fetchFreshVisitorData()
+
     suspend fun searchSuggestions(query: String): Result<SearchSuggestions> = runCatching {
         val response = innerTube.getSearchSuggestions(WEB_REMIX, query).body<GetSearchSuggestionsResponse>()
         SearchSuggestions(

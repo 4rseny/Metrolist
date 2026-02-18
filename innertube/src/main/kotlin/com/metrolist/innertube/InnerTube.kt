@@ -26,6 +26,7 @@ import java.net.Proxy
 import java.io.IOException
 import kotlinx.coroutines.delay
 import java.util.*
+import timber.log.Timber
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -56,10 +57,38 @@ class InnerTube {
             httpClient.close()
             httpClient = createClient()
         }
-    
+
     var proxyAuth: String? = null
 
     var useLoginForBrowse: Boolean = false
+
+    /**
+     * Worker URL for anonymous login.
+     * When set, requests are routed through the CF worker which handles authentication.
+     */
+    var anonWorkerUrl: String? = null
+        set(value) {
+            Timber.d("anonWorkerUrl changing from $field to $value")
+            field = value
+            httpClient.close()
+            httpClient = createClient()
+            Timber.d("httpClient recreated with anonWorkerUrl=$anonWorkerUrl")
+        }
+
+    val isAnonLoginEnabled: Boolean
+        get() = !anonWorkerUrl.isNullOrEmpty()
+
+    /**
+     * Flag indicating anonymous login is active (using worker credentials).
+     * For PoToken generation, we need to use app-generated visitorData instead of worker's.
+     */
+    var isAnonLogin: Boolean = false
+
+    /**
+     * App-generated visitorData for PoToken (used with anon login).
+     * This is separate from the worker's visitorData.
+     */
+    var appVisitorData: String? = null
 
     @OptIn(ExperimentalSerializationApi::class)
     private fun createClient() = HttpClient(OkHttp) {
@@ -133,7 +162,10 @@ class InnerTube {
         }
 
         defaultRequest {
-            url(YouTubeClient.API_URL_YOUTUBE_MUSIC)
+            // Use worker URL if anonymous login is enabled, otherwise use YouTube directly
+            val baseUrl = anonWorkerUrl?.let { "$it/youtubei/v1/" } ?: YouTubeClient.API_URL_YOUTUBE_MUSIC
+            Timber.d("InnerTube request: baseUrl=$baseUrl, anonWorkerUrl=$anonWorkerUrl")
+            url(baseUrl)
             // Add common headers for better compatibility
             header("Accept", "application/json")
             header("Accept-Language", "en-US,en;q=0.9")
@@ -150,7 +182,9 @@ class InnerTube {
             append("X-Origin", YouTubeClient.ORIGIN_YOUTUBE_MUSIC)
             append("Referer", YouTubeClient.REFERER_YOUTUBE_MUSIC)
             visitorData?.let { append("X-Goog-Visitor-Id", it) }
-            if (setLogin && client.loginSupported) {
+            // Skip local auth if using worker (worker handles auth)
+            // But still use local auth if user has cookies (Google login)
+            if (setLogin && client.loginSupported && !isAnonLoginEnabled) {
                 cookie?.let { cookie ->
                     append("cookie", cookie)
                     if ("SAPISID" !in cookieMap) return@let
@@ -770,5 +804,61 @@ class InnerTube {
 
         }
 
+    /**
+     * Fetch a fresh visitorData by making an unauthenticated request to YouTube.
+     * This is used for PoToken generation with anonymous login.
+     */
+    suspend fun fetchFreshVisitorData(): String? {
+        return try {
+            Timber.d("Fetching fresh visitorData for PoToken")
+            // Create a temporary client without cookies for this request
+            val tempClient = HttpClient(OkHttp) {
+                install(ContentNegotiation) {
+                    json(Json {
+                        ignoreUnknownKeys = true
+                        explicitNulls = false
+                    })
+                }
+                install(ContentEncoding) {
+                    gzip(0.9F)
+                    deflate(0.8F)
+                }
+            }
+
+            val response = tempClient.post("https://music.youtube.com/youtubei/v1/browse") {
+                contentType(ContentType.Application.Json)
+                header("User-Agent", YouTubeClient.USER_AGENT_WEB)
+                header("Origin", "https://music.youtube.com")
+                header("Referer", "https://music.youtube.com/")
+                setBody(
+                    BrowseBody(
+                        context = YouTubeClient.WEB_REMIX.toContext(locale, null, null),
+                        browseId = "FEmusic_home",
+                        params = null,
+                        continuation = null
+                    )
+                )
+            }
+
+            val responseText = response.bodyAsText()
+            tempClient.close()
+
+            // Extract visitorData from response
+            val visitorDataMatch = Regex(""""visitorData"\s*:\s*"([^"]+)"""").find(responseText)
+            val freshVisitorData = visitorDataMatch?.groupValues?.get(1)
+
+            if (freshVisitorData != null) {
+                Timber.d("Got fresh visitorData: ${freshVisitorData.take(30)}...")
+                appVisitorData = freshVisitorData
+            } else {
+                Timber.w("Could not extract visitorData from response")
+            }
+
+            freshVisitorData
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to fetch fresh visitorData")
+            null
+        }
+    }
 
 }
