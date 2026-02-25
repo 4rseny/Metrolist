@@ -177,43 +177,73 @@ constructor(
                 "Download stream for $mediaId: itag=${format.itag}, mimeType=${format.mimeType.split(";")[0]}, bitrate=${format.bitrate/1000}kbps"
             )
 
-            database.query {
-                upsert(
-                    FormatEntity(
-                        id = mediaId,
-                        itag = format.itag,
-                        mimeType = format.mimeType.split(";")[0],
-                        codecs = format.mimeType.split("codecs=")[1].removeSurrounding("\""),
-                        bitrate = format.bitrate,
-                        sampleRate = format.audioSampleRate,
-                        contentLength = format.contentLength!!,
-                        loudnessDb = playbackData.audioConfig?.loudnessDb,
-                        perceptualLoudnessDb = playbackData.audioConfig?.perceptualLoudnessDb,
-                        playbackUrl = playbackData.playbackTracking?.videostatsPlaybackUrl?.baseUrl
-                    ),
-                )
-
-                val now = LocalDateTime.now()
-                val existing = getSongByIdBlocking(mediaId)?.song
-
-                val updatedSong = if (existing != null) {
-                    if (existing.dateDownload == null) {
-                        existing.copy(dateDownload = now)
-                    } else {
-                        existing
-                    }
-                } else {
-                    SongEntity(
-                        id = mediaId,
-                        title = playbackData.videoDetails?.title ?: "Unknown",
-                        duration = playbackData.videoDetails?.lengthSeconds?.toIntOrNull() ?: 0,
-                        thumbnailUrl = playbackData.videoDetails?.thumbnail?.thumbnails?.lastOrNull()?.url,
-                        dateDownload = now,
-                        isDownloaded = false
+            // Store format synchronously to ensure it's available for metadata embedding after download
+            runBlocking(Dispatchers.IO) {
+                database.withTransaction {
+                    upsert(
+                        FormatEntity(
+                            id = mediaId,
+                            itag = format.itag,
+                            mimeType = format.mimeType.split(";")[0],
+                            codecs = format.mimeType.split("codecs=")[1].removeSurrounding("\""),
+                            bitrate = format.bitrate,
+                            sampleRate = format.audioSampleRate,
+                            contentLength = format.contentLength!!,
+                            loudnessDb = playbackData.audioConfig?.loudnessDb,
+                            perceptualLoudnessDb = playbackData.audioConfig?.perceptualLoudnessDb,
+                            playbackUrl = playbackData.playbackTracking?.videostatsPlaybackUrl?.baseUrl
+                        ),
                     )
-                }
 
-                upsert(updatedSong)
+                    val now = LocalDateTime.now()
+                    val existing = getSongByIdBlocking(mediaId)?.song
+
+                    val updatedSong = if (existing != null) {
+                        if (existing.dateDownload == null) {
+                            existing.copy(dateDownload = now)
+                        } else {
+                            existing
+                        }
+                    } else {
+                        SongEntity(
+                            id = mediaId,
+                            title = playbackData.videoDetails?.title ?: "Unknown",
+                            duration = playbackData.videoDetails?.lengthSeconds?.toIntOrNull() ?: 0,
+                            thumbnailUrl = playbackData.videoDetails?.thumbnail?.thumbnails?.lastOrNull()?.url,
+                            dateDownload = now,
+                            isDownloaded = false
+                        )
+                    }
+
+                    upsert(updatedSong)
+
+                    // Create artist relationship if song is new and has author info
+                    val videoDetails = playbackData.videoDetails
+                    val authorName = videoDetails?.author
+                    if (existing == null && authorName != null) {
+                        val channelId = videoDetails.channelId
+                        // Check if artist exists, create if not
+                        val existingArtist = artistByName(authorName)
+                        val artistId = existingArtist?.id ?: channelId
+                        if (existingArtist == null) {
+                            insert(
+                                com.metrolist.music.db.entities.ArtistEntity(
+                                    id = artistId,
+                                    name = authorName,
+                                    channelId = channelId
+                                )
+                            )
+                        }
+                        // Create song-artist relationship
+                        insert(
+                            com.metrolist.music.db.entities.SongArtistMap(
+                                songId = mediaId,
+                                artistId = artistId,
+                                position = 0
+                            )
+                        )
+                    }
+                }
             }
 
             val streamUrl = playbackData.streamUrl.let {

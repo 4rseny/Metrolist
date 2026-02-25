@@ -69,6 +69,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 import java.time.LocalDateTime
 
 @Composable
@@ -163,6 +164,40 @@ fun PlaylistMenu(
 
     var showRemoveDownloadDialog by remember {
         mutableStateOf(false)
+    }
+
+    // Download format picker state
+    var showDownloadFormatDialog by remember { mutableStateOf(false) }
+    var availableFormats by remember { mutableStateOf<List<com.metrolist.music.utils.YTPlayerUtils.AudioFormatOption>>(emptyList()) }
+    var isLoadingFormats by remember { mutableStateOf(false) }
+
+    if (showDownloadFormatDialog) {
+        com.metrolist.music.ui.component.DownloadFormatDialog(
+            isLoading = isLoadingFormats,
+            formats = availableFormats,
+            onFormatSelected = { format ->
+                Timber.tag("PlaylistMenu").d("Format selected for playlist: ${format.displayName} (itag=${format.itag})")
+                showDownloadFormatDialog = false
+                // Download all songs with selected format
+                songs.forEach { song ->
+                    downloadUtil.setTargetItag(song.id, format.itag)
+                    val downloadRequest = DownloadRequest
+                        .Builder(song.id, song.id.toUri())
+                        .setCustomCacheKey(song.id)
+                        .setData(song.song.title.toByteArray())
+                        .build()
+                    DownloadService.sendAddDownload(
+                        context,
+                        ExoDownloadService::class.java,
+                        downloadRequest,
+                        false,
+                    )
+                }
+            },
+            onDismiss = {
+                showDownloadFormatDialog = false
+            }
+        )
     }
 
     if (showRemoveDownloadDialog) {
@@ -539,19 +574,29 @@ fun PlaylistMenu(
                                             )
                                         },
                                         onClick = {
-                                            songs.forEach { song ->
-                                                val downloadRequest =
-                                                    DownloadRequest
-                                                        .Builder(song.id, song.id.toUri())
-                                                        .setCustomCacheKey(song.id)
-                                                        .setData(song.song.title.toByteArray())
-                                                        .build()
-                                                DownloadService.sendAddDownload(
-                                                    context,
-                                                    ExoDownloadService::class.java,
-                                                    downloadRequest,
-                                                    false,
-                                                )
+                                            if (songs.isEmpty()) return@Material3MenuItemData
+                                            // Show format picker - fetch formats from first song
+                                            showDownloadFormatDialog = true
+                                            isLoadingFormats = true
+                                            availableFormats = emptyList()
+
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val firstSong = songs.first()
+                                                    val formats = com.metrolist.music.utils.YTPlayerUtils
+                                                        .getAllAvailableAudioFormats(firstSong.id)
+                                                        .getOrNull() ?: emptyList()
+                                                    withContext(Dispatchers.Main) {
+                                                        availableFormats = formats
+                                                        isLoadingFormats = false
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Timber.tag("PlaylistMenu").e(e, "Failed to fetch formats")
+                                                    withContext(Dispatchers.Main) {
+                                                        isLoadingFormats = false
+                                                        showDownloadFormatDialog = false
+                                                    }
+                                                }
                                             }
                                         }
                                     )

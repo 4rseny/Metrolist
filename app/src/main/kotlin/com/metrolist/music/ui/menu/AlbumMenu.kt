@@ -89,6 +89,7 @@ import com.metrolist.music.ui.component.NewActionGrid
 import com.metrolist.music.ui.component.SongListItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 @SuppressLint("MutableCollectionMutableState")
@@ -542,6 +543,7 @@ fun AlbumMenu(
                                     Timber.tag("AlbumMenu").d("Swap download clicked for album")
                                     showDownloadFormatDialog = true
                                     isLoadingFormats = true
+                                    availableFormats = emptyList()
                                     coroutineScope.launch(Dispatchers.IO) {
                                         // Remove all existing downloads first
                                         songs.forEach { song ->
@@ -553,13 +555,18 @@ fun AlbumMenu(
                                             )
                                         }
                                         // Fetch formats from first song
-                                        val result = com.metrolist.music.utils.YTPlayerUtils.getAllAvailableAudioFormats(songs.first().id)
-                                        result.onSuccess { formats ->
-                                            availableFormats = formats
-                                            isLoadingFormats = false
-                                        }.onFailure {
-                                            availableFormats = emptyList()
-                                            isLoadingFormats = false
+                                        try {
+                                            val formats = com.metrolist.music.utils.YTPlayerUtils.getAllAvailableAudioFormats(songs.first().id).getOrNull() ?: emptyList()
+                                            withContext(Dispatchers.Main) {
+                                                availableFormats = formats
+                                                isLoadingFormats = false
+                                            }
+                                        } catch (e: Exception) {
+                                            Timber.tag("AlbumMenu").e(e, "Failed to fetch formats for swap")
+                                            withContext(Dispatchers.Main) {
+                                                isLoadingFormats = false
+                                                showDownloadFormatDialog = false
+                                            }
                                         }
                                     }
                                 }
@@ -606,11 +613,16 @@ fun AlbumMenu(
                                     coroutineScope.launch(Dispatchers.IO) {
                                         try {
                                             val formats = com.metrolist.music.utils.YTPlayerUtils.getAllAvailableAudioFormats(songs.first().id).getOrNull() ?: emptyList()
-                                            availableFormats = formats
+                                            withContext(Dispatchers.Main) {
+                                                availableFormats = formats
+                                                isLoadingFormats = false
+                                            }
                                         } catch (e: Exception) {
                                             Timber.tag("AlbumMenu").e(e, "Failed to fetch formats")
-                                        } finally {
-                                            isLoadingFormats = false
+                                            withContext(Dispatchers.Main) {
+                                                isLoadingFormats = false
+                                                showDownloadFormatDialog = false
+                                            }
                                         }
                                     }
                                 }

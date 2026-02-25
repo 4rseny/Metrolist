@@ -153,6 +153,10 @@ class DownloadExportHelper @Inject constructor(
 
             // Embed metadata for M4A files (128kbps+ only - lower bitrates have compatibility issues)
             val bitrateKbps = (format?.bitrate ?: 0) / 1000
+            if (format == null) {
+                Timber.tag(TAG).w("Format entity is null for $songId - metadata embedding skipped")
+            }
+            Timber.tag(TAG).d("Metadata check: extension=$extension, bitrate=${bitrateKbps}kbps, eligible=${extension == "m4a" && bitrateKbps >= 128}")
             if (extension == "m4a" && bitrateKbps >= 128) {
                 Timber.tag(TAG).d("M4A file detected (${bitrateKbps}kbps), embedding metadata...")
                 try {

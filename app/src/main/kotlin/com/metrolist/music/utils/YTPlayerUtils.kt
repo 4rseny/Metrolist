@@ -388,7 +388,40 @@ object YTPlayerUtils {
                 Timber.tag(logTag).d("Using exact itag $targetItag: ${exactFormat.mimeType}, bitrate: ${exactFormat.bitrate}")
                 return exactFormat
             }
-            Timber.tag(logTag).w("Requested itag $targetItag not found, falling back to auto selection")
+            Timber.tag(logTag).w("Requested itag $targetItag not found, trying to find same codec type")
+
+            // Try to find a format of the same codec type (M4A or OPUS) with similar bitrate
+            // This handles cases where different songs have different available itags
+            val allFormats = playerResponse.streamingData?.adaptiveFormats?.filter { it.isAudio && it.isOriginal }
+            val requestedFormat = allFormats?.find { it.itag == targetItag }
+
+            // Determine if the requested format was M4A or OPUS based on common itags
+            // M4A itags: 139, 140, 141, 256, 258, 327, 380, 774
+            // OPUS itags: 249, 250, 251, 338
+            val isM4aRequested = targetItag in listOf(139, 140, 141, 256, 258, 327, 380, 774)
+            val isOpusRequested = targetItag in listOf(249, 250, 251, 338)
+
+            if (isM4aRequested) {
+                // Find best M4A format available
+                val m4aFormat = allFormats
+                    ?.filter { it.mimeType.contains("mp4a") || it.mimeType.contains("audio/mp4") }
+                    ?.maxByOrNull { it.bitrate }
+                if (m4aFormat != null) {
+                    Timber.tag(logTag).d("Using alternative M4A format: itag=${m4aFormat.itag}, bitrate=${m4aFormat.bitrate}")
+                    return m4aFormat
+                }
+            } else if (isOpusRequested) {
+                // Find best OPUS format available
+                val opusFormat = allFormats
+                    ?.filter { it.mimeType.contains("opus") || it.mimeType.contains("audio/webm") }
+                    ?.maxByOrNull { it.bitrate }
+                if (opusFormat != null) {
+                    Timber.tag(logTag).d("Using alternative OPUS format: itag=${opusFormat.itag}, bitrate=${opusFormat.bitrate}")
+                    return opusFormat
+                }
+            }
+
+            Timber.tag(logTag).w("No matching codec type found, falling back to auto selection")
         }
 
         Timber.tag(logTag).d("Finding format with audioQuality: $audioQuality, network metered: ${connectivityManager.isActiveNetworkMetered}")

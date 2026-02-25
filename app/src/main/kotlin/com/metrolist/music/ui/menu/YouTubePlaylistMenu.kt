@@ -90,6 +90,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("MutableCollectionMutableState")
@@ -277,6 +278,45 @@ fun YouTubePlaylistMenu(
                 ) {
                     Text(text = stringResource(android.R.string.ok))
                 }
+            }
+        )
+    }
+
+    // Download format picker state
+    var showDownloadFormatDialog by remember { mutableStateOf(false) }
+    var availableFormats by remember { mutableStateOf<List<com.metrolist.music.utils.YTPlayerUtils.AudioFormatOption>>(emptyList()) }
+    var isLoadingFormats by remember { mutableStateOf(false) }
+
+    if (showDownloadFormatDialog) {
+        com.metrolist.music.ui.component.DownloadFormatDialog(
+            isLoading = isLoadingFormats,
+            formats = availableFormats,
+            onFormatSelected = { format ->
+                Timber.tag("YouTubePlaylistMenu").d("Format selected for playlist: ${format.displayName} (itag=${format.itag})")
+                showDownloadFormatDialog = false
+                // Insert songs to database first, then download with selected format
+                database.transaction {
+                    songs.forEach { song ->
+                        insert(song.toMediaMetadata())
+                    }
+                }
+                songs.forEach { song ->
+                    downloadUtil.setTargetItag(song.id, format.itag)
+                    val downloadRequest = DownloadRequest
+                        .Builder(song.id, song.id.toUri())
+                        .setCustomCacheKey(song.id)
+                        .setData(song.title.toByteArray())
+                        .build()
+                    DownloadService.sendAddDownload(
+                        context,
+                        ExoDownloadService::class.java,
+                        downloadRequest,
+                        false,
+                    )
+                }
+            },
+            onDismiss = {
+                showDownloadFormatDialog = false
             }
         )
     }
@@ -586,18 +626,29 @@ fun YouTubePlaylistMenu(
                                             )
                                         },
                                         onClick = {
-                                            songs.forEach { song ->
-                                                val downloadRequest =
-                                                    DownloadRequest.Builder(song.id, song.id.toUri())
-                                                        .setCustomCacheKey(song.id)
-                                                        .setData(song.title.toByteArray())
-                                                        .build()
-                                                DownloadService.sendAddDownload(
-                                                    context,
-                                                    ExoDownloadService::class.java,
-                                                    downloadRequest,
-                                                    false
-                                                )
+                                            if (songs.isEmpty()) return@Material3MenuItemData
+                                            // Show format picker - fetch formats from first song
+                                            showDownloadFormatDialog = true
+                                            isLoadingFormats = true
+                                            availableFormats = emptyList()
+
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val firstSong = songs.first()
+                                                    val formats = com.metrolist.music.utils.YTPlayerUtils
+                                                        .getAllAvailableAudioFormats(firstSong.id)
+                                                        .getOrNull() ?: emptyList()
+                                                    withContext(Dispatchers.Main) {
+                                                        availableFormats = formats
+                                                        isLoadingFormats = false
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Timber.tag("YouTubePlaylistMenu").e(e, "Failed to fetch formats")
+                                                    withContext(Dispatchers.Main) {
+                                                        isLoadingFormats = false
+                                                        showDownloadFormatDialog = false
+                                                    }
+                                                }
                                             }
                                         }
                                     )
